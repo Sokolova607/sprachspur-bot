@@ -37,7 +37,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN fehlt.")
 
-KIE_API_KEY = os.getenv("KIE_API_KEY")
+KIE_API_KEY = (os.getenv("KIE_API_KEY") or "").strip()
 KIE_API_URL = os.getenv(
     "KIE_API_URL",
     "https://api.kie.ai/gemini-3-5-flash-openai/v1/chat/completions",
@@ -236,15 +236,17 @@ async def acknowledge_wrong(callback: CallbackQuery, text: str) -> None:
 
 
 def extract_ai_content(result: dict[str, Any]) -> str:
-    content = result["choices"][0]["message"]["content"]
+    content = None
+    if result.get("choices"):
+        content = result["choices"][0].get("message", {}).get("content")
+    elif result.get("candidates"):
+        parts = result["candidates"][0].get("content", {}).get("parts", [])
+        content = "".join(p.get("text", "") for p in parts if not p.get("thought"))
     if isinstance(content, list):
-        content = "".join(
-            item.get("text", "") for item in content if isinstance(item, dict)
-        )
-    text = str(content).strip()
-    if not text:
-        raise RuntimeError("Leere KI-Antwort.")
-    return text
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("KI-Antwort ohne nutzbaren Text.")
+    return content.strip()
 
 
 async def kie_request(system_prompt,user_prompt,*,max_tokens=320,temperature=0.15,response_format=None):
@@ -264,12 +266,13 @@ async def kie_request(system_prompt,user_prompt,*,max_tokens=320,temperature=0.1
         connector=ProxyConnector.from_url(proxy)
     elif proxy:
         http_proxy=proxy
-    payload={'messages':[{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}],'temperature':temperature,'max_tokens':max_tokens,'stream':False}
+    payload={'model':os.getenv('KIE_MODEL', 'gemini-3-5-flash-thinking'),'messages':[{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}],'temperature':temperature,'max_tokens':max_tokens,'stream':False}
     if response_format:
         payload['response_format']=response_format
     async with aiohttp.ClientSession(connector=connector,timeout=aiohttp.ClientTimeout(total=45)) as client:
         async with client.post(KIE_API_URL,json=payload,headers={'Authorization':'Bearer '+KIE_API_KEY},proxy=http_proxy) as response:
             if response.status!=200:
+                logging.error('KIE request failed: HTTP %s', response.status)
                 raise RuntimeError('KI-Anfrage fehlgeschlagen: HTTP '+str(response.status))
             return extract_ai_content(await response.json())
 
@@ -1361,7 +1364,8 @@ async def text_handler(message):
         session['awaiting']=session.get('help_previous','')
         try:
             answer=await answer_language_question(text[:1200],session.get('help_context','Deutsch im Museum'))
-        except Exception:
+        except Exception as exc:
+            logging.error('KIE Sprachhilfe failed: %s', type(exc).__name__)
             answer='Die Sprachhilfe ist gerade nicht erreichbar. Du kannst zur Aufgabe zurückkehren.'
         await message.answer(html.escape(answer[:1600]),reply_markup=markup([button('Zurück zur Aufgabe',session.get('help_return','case:resume'))]))
     elif awaiting=='report':
