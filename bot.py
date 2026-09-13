@@ -138,6 +138,8 @@ def reset_case(user_id: int, keep_profile: bool = True) -> None:
         "report": "",
         "solved": False,
     }
+    if current.get("active_audio_message"):
+        USERS[str(user_id)]["active_audio_message"] = current["active_audio_message"]
     SESSIONS[user_id] = {
         "awaiting": "",
         "access_selected": [],
@@ -1041,6 +1043,27 @@ async def transport_language(callback: CallbackQuery) -> None:
     await callback.answer()
     await replace_message(callback.message, '<b>ERGÄNZE DEN SICHERSTELLUNGSBERICHT</b>\n\nDie Handschrift sollte in der Technikkiste …\n\nA: verstecken und transportieren werden\nB: versteckt und transportiert werden\nC: wurde versteckt und transportieren', markup([button('A','q3grammar:wrong1'),button('B','q3grammar:ok'),button('C','q3grammar:wrong2')]))
 
+
+_AUDIO_LOCKS = {}
+
+async def send_single_audio(message, user_id, audio, **kwargs):
+    """Keep one bot audio message per learner/chat; serialize rapid clicks."""
+    chat_id = message.chat.id
+    lock = _AUDIO_LOCKS.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        data = user_data(user_id)
+        previous = data.get("active_audio_message")
+        if previous and previous.get("chat_id") == chat_id:
+            try:
+                await message.bot.delete_message(chat_id=chat_id, message_id=previous["message_id"])
+            except TelegramBadRequest as exc:
+                if "message to delete not found" not in str(exc).lower():
+                    await message.answer("Bitte lösche die vorherige Audioaufnahme im Chat und wähle die Person erneut.")
+                    return
+        sent = await message.answer_audio(audio, **kwargs)
+        data["active_audio_message"] = {"chat_id": chat_id, "message_id": sent.message_id}
+        save_users()
+
 async def show_resolution(message,user_id,part):
     if not user_data(user_id).get('solved'):
         await show_board(message,user_id)
@@ -1058,7 +1081,7 @@ async def show_resolution(message,user_id,part):
     image_name=f'confession_{part}.png'
     await replace_message(message,'<b>'+name+'</b>',asset_name=image_name)
     if audio.is_file():
-        await message.answer_audio(FSInputFile(audio),title=name+' — Die Auflösung',performer=name,reply_markup=markup(*rows))
+        await send_single_audio(message,user_id,FSInputFile(audio),title=name+' — Die Auflösung',performer=name,reply_markup=markup(*rows))
     else:
         await message.answer(html.escape(CONFESSION_TEXTS[part]),reply_markup=markup(*rows))
 
@@ -1196,7 +1219,7 @@ async def statement_open(callback):
     rows.append([button('Kontrolldaten vergleichen','statements:compare')])
     if audio:
         await replace_message(callback.message,'<b>'+SUSPECTS[key]+'</b>',asset_name=SUSPECT_FILES[key])
-        await callback.message.answer_audio(FSInputFile(audio),title='Aussage: '+SUSPECTS[key],performer=SUSPECTS[key],reply_markup=markup(*rows))
+        await send_single_audio(callback.message,callback.from_user.id,FSInputFile(audio),title='Aussage: '+SUSPECTS[key],performer=SUSPECTS[key],reply_markup=markup(*rows))
     else:
         await replace_message(callback.message,'<b>'+SUSPECTS[key]+'</b>\n\n„'+STATEMENT_QUOTES[key]+'“',markup(*rows),SUSPECT_FILES[key])
 
